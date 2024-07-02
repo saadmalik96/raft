@@ -81,7 +81,7 @@ void CuStringAppendFormat(CuString* str, const char* format, ...)
 	va_list argp;
 	char buf[HUGE_STRING_LEN];
 	va_start(argp, format);
-	vsprintf(buf, format, argp);
+	vsnprintf(buf, sizeof(buf), format, argp);
 	va_end(argp);
 	CuStringAppend(str, buf);
 }
@@ -138,7 +138,7 @@ static void CuFailInternal(CuTest* tc, const char* file, int line, CuString* str
 {
 	char buf[HUGE_STRING_LEN];
 
-	sprintf(buf, "%s:%d: ", file, line);
+	snprintf(buf, sizeof(buf), "%s:%d: ", file, line);
 	CuStringInsert(string, buf, 0);
 
 	tc->failed = 1;
@@ -196,7 +196,7 @@ void CuAssertIntEquals_LineMsg(CuTest* tc, const char* file, int line, const cha
 {
 	char buf[STRING_MAX];
 	if (expected == actual) return;
-	sprintf(buf, "expected <%d> but was <%d>", expected, actual);
+	snprintf(buf, sizeof(buf), "expected <%d> but was <%d>", expected, actual);
 	CuFail_Line(tc, file, line, message, buf);
 }
 
@@ -205,7 +205,7 @@ void CuAssertDblEquals_LineMsg(CuTest* tc, const char* file, int line, const cha
 {
 	char buf[STRING_MAX];
 	if (fabs(expected - actual) <= delta) return;
-	sprintf(buf, "expected <%lf> but was <%lf>", expected, actual);
+	snprintf(buf, sizeof(buf), "expected <%lf> but was <%lf>", expected, actual);
 	CuFail_Line(tc, file, line, message, buf);
 }
 
@@ -214,7 +214,7 @@ void CuAssertPtrEquals_LineMsg(CuTest* tc, const char* file, int line, const cha
 {
 	char buf[STRING_MAX];
 	if (expected == actual) return;
-	sprintf(buf, "expected pointer <0x%p> but was <0x%p>", expected, actual);
+	snprintf(buf, sizeof(buf), "expected pointer <0x%p> but was <0x%p>", expected, actual);
 	CuFail_Line(tc, file, line, message, buf);
 }
 

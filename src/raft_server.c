@@ -52,7 +52,7 @@ static void __log(raft_server_t *me_, raft_node_t* node, const char *fmt, ...)
     va_list args;
 
     va_start(args, fmt);
-    vsprintf(buf, fmt, args);
+    vsnprintf(buf, sizeof(buf), fmt, args);
 
     me->cb.log(me_, node, me->udata, buf);
 }
