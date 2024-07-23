@@ -1,13 +1,13 @@
 CC = gcc
-CFLAGS = -Iinclude -Wall -Wextra -O2
+CFLAGS = -Iinclude -Wall -O2
 
 SRC = $(wildcard src/*.c)
 OBJ = $(SRC:.c=.o)
 
-all: my_raft_app
+all: raft
 
-my_raft_app: $(OBJ)
+raft: $(OBJ)
 	$(CC) -o $@ $^
 
 clean:
-	rm -f $(OBJ) my_raft_app
+	rm -f $(OBJ) raft

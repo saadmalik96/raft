@@ -1,176 +1,122 @@
-#include <unistd.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
-#include <pthread.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
 #include "raft.h"
-#include "raft_types.h"
-#include "raft_log.h"
-#include "raft_private.h"
 
-
-#define MAX_NODES 2
+#define NUM_NODES 5
 
 typedef struct {
-    raft_server_t* raft;
-    pthread_mutex_t lock;
-    int id;
-} node_t;
+    raft_server_t *raft;
+    raft_node_t *nodes[NUM_NODES];
+    int node_id;
+} server_t;
 
-node_t nodes[MAX_NODES];
+server_t servers[NUM_NODES];
 
-typedef struct {
-    int from;
-    int to;
-    int type; // 1 for RequestVote, 2 for AppendEntries
-    union {
-        msg_requestvote_t rv;
-        msg_appendentries_t ae;
-    } msg;
-} message_t;
-
-message_t msg_queue[100];
-int msg_count = 0;
-
-void send_message(int from, int to, int type, void* msg) {
-    pthread_mutex_lock(&nodes[to].lock);
-    msg_queue[msg_count].from = from;
-    msg_queue[msg_count].to = to;
-    msg_queue[msg_count].type = type;
-    if (type == 1) {
-        memcpy(&msg_queue[msg_count].msg.rv, msg, sizeof(msg_requestvote_t));
-    } else if (type == 2) {
-        memcpy(&msg_queue[msg_count].msg.ae, msg, sizeof(msg_appendentries_t));
-    }
-    msg_count++;
-    pthread_mutex_unlock(&nodes[to].lock);
-}
-
-void process_messages(node_t* node) {
-    pthread_mutex_lock(&node->lock);
-    for (int i = 0; i < msg_count; i++) {
-        if (msg_queue[i].to == node->id) {
-            raft_node_t* sender_node = raft_get_node(node->raft, msg_queue[i].from);
-            if (msg_queue[i].type == 1) {
-                msg_requestvote_response_t r;
-                raft_recv_requestvote(node->raft, sender_node, &msg_queue[i].msg.rv, &r);
-            } else if (msg_queue[i].type == 2) {
-                msg_appendentries_response_t r;
-                raft_recv_appendentries(node->raft, sender_node, &msg_queue[i].msg.ae, &r);
-            }
-        }
-    }
-    pthread_mutex_unlock(&node->lock);
-}
-
-void* node_thread(void* arg) {
-    node_t* node = (node_t*)arg;
-    for (int i = 0; i < 10; i++) {
-        raft_periodic(node->raft, 1000); // Simulate periodic callback every second
-        process_messages(node);
-        printf("Node %d periodic callback #%d\n", node->id, i);
-        sleep(1);
-    }
-    return NULL;
-}
-
-static int my_send_requestvote(raft_server_t* raft, void *udata, raft_node_t *node, msg_requestvote_t* m) {
-    (void)raft; (void)udata;
-    int node_id = raft_node_get_id(node);
-    send_message(((node_t*)udata)->id, node_id, 1, m);
-    printf("Node %d sending RequestVote to node %d\n", ((node_t*)udata)->id, node_id);
+static int __send_requestvote(raft_server_t* raft, void *user_data, raft_node_t* node, msg_requestvote_t* msg) {
+    server_t *server = (server_t*)user_data;
+    int target_node = raft_node_get_id(node) - 1;
+    
+    printf("Node %d sending requestvote to Node %d\n", server->node_id, target_node + 1);
+    
+    msg_requestvote_response_t response;
+    raft_recv_requestvote(servers[target_node].raft, servers[target_node].nodes[server->node_id - 1], msg, &response);
+    raft_recv_requestvote_response(raft, node, &response);
+    
     return 0;
 }
 
-static int my_send_appendentries(raft_server_t* raft, void *udata, raft_node_t *node, msg_appendentries_t* m) {
-    (void)raft; (void)udata;
-    int node_id = raft_node_get_id(node);
-    send_message(((node_t*)udata)->id, node_id, 2, m);
-    printf("Node %d sending AppendEntries to node %d\n", ((node_t*)udata)->id, node_id);
+// Callback for sending appendentries messages
+static int __send_appendentries(raft_server_t* raft, void *user_data, raft_node_t* node, msg_appendentries_t* msg) {
+    server_t *server = (server_t*)user_data;
+    int target_node = raft_node_get_id(node) - 1;
+    
+    printf("Node %d sending appendentries to Node %d\n", server->node_id, target_node + 1);
+    
+    msg_appendentries_response_t response;
+    raft_recv_appendentries(servers[target_node].raft, servers[target_node].nodes[server->node_id - 1], msg, &response);
+    raft_recv_appendentries_response(raft, node, &response);
+    
     return 0;
 }
 
-static int my_applylog(raft_server_t* raft, void *udata, raft_entry_t *ety, raft_index_t ety_idx) {
-    (void)raft; (void)udata; (void)ety_idx;
-    printf("Applying log entry with id %d\n", ety->id);
+// Callback for applying log entries to the state machine
+static int __applylog(raft_server_t* raft, void *user_data, raft_entry_t *entry, raft_index_t entry_idx) {
+    server_t *server = (server_t*)user_data;
+    printf("Node %d applying log entry %ld\n", server->node_id, entry_idx);
     return 0;
 }
 
-static int my_persist_vote(raft_server_t* raft, void *udata, raft_node_id_t vote) {
-    (void)raft; (void)udata;
-    printf("Persisting vote: %d\n", vote);
+// Callback for persisting vote data
+static int __persist_vote(raft_server_t* raft, void *user_data, raft_node_id_t vote) {
+    server_t *server = (server_t*)user_data;
+    printf("Node %d persisting vote for node %d\n", server->node_id, vote);
     return 0;
 }
 
-static int my_persist_term(raft_server_t* raft, void *udata, raft_term_t term, raft_node_id_t vote) {
-    (void)raft; (void)udata;
-    printf("Persisting term: %ld and vote: %d\n", term, vote);
+// Callback for persisting term data
+static int __persist_term(raft_server_t* raft, void *user_data, raft_term_t term, raft_node_id_t vote) {
+    server_t *server = (server_t*)user_data;
+    printf("Node %d persisting term %ld and vote for node %d\n", server->node_id, term, vote);
     return 0;
 }
 
-static int my_log_offer(raft_server_t* raft, void *udata, raft_entry_t *ety, raft_index_t ety_idx) {
-    (void)raft; (void)udata;
-    printf("Offering log entry with id %d at index %ld\n", ety->id, ety_idx);
-    return 0;
+// Callback for logging debug messages
+static void __log(raft_server_t* raft, raft_node_t* node, void *user_data, const char *buf) {
+    server_t *server = (server_t*)user_data;
+    printf("Node %d: %s\n", server->node_id, buf);
 }
-
-static int my_log_poll(raft_server_t* raft, void *udata, raft_entry_t *entry, raft_index_t ety_idx) {
-    (void)raft; (void)udata; (void)ety_idx;
-    printf("Polling log entry with id %d\n", entry->id);
-    return 0;
-}
-
-static int my_log_pop(raft_server_t* raft, void *udata, raft_entry_t *entry, raft_index_t ety_idx) {
-    (void)raft; (void)udata; (void)ety_idx;
-    printf("Popping log entry with id %d\n", entry->id);
-    return 0;
-}
-
-static void my_log(raft_server_t* raft, raft_node_t* node, void *udata, const char *buf) {
-    (void)raft; (void)node; (void)udata;
-    printf("Raft log: %s\n", buf);
-}
-
-static int my_node_has_sufficient_logs(raft_server_t* raft, void *udata, raft_node_t* node) {
-    (void)raft; (void)udata;
-    printf("Node %d has sufficient logs\n", raft_node_get_id(node));
-    return 0;
-}
-
-raft_cbs_t my_callbacks = {
-    .send_requestvote = my_send_requestvote,
-    .send_appendentries = my_send_appendentries,
-    .applylog = my_applylog,
-    .persist_vote = my_persist_vote,
-    .persist_term = my_persist_term,
-    .log_offer = my_log_offer,
-    .log_poll = my_log_poll,
-    .log_pop = my_log_pop,
-    .log = my_log,
-    .node_has_sufficient_logs = my_node_has_sufficient_logs,
-};
 
 int main() {
-    for (int i = 0; i < MAX_NODES; i++) {
-        nodes[i].raft = raft_new();
-        nodes[i].id = i;
-        pthread_mutex_init(&nodes[i].lock, NULL);
-        raft_set_callbacks(nodes[i].raft, &my_callbacks, &nodes[i]);
-        raft_add_node(nodes[i].raft, &nodes[i], i, i == 0);
+    srand(time(NULL));
+    
+    raft_cbs_t raft_callbacks = {
+        .send_requestvote = __send_requestvote,
+        .send_appendentries = __send_appendentries,
+        .applylog = __applylog,
+        .persist_vote = __persist_vote,
+        .persist_term = __persist_term,
+        .log = __log
+    };
+
+    // Initialize raft servers
+    for (int i = 0; i < NUM_NODES; i++) {
+        servers[i].raft = raft_new();
+        servers[i].node_id = i + 1;
+        raft_set_callbacks(servers[i].raft, &raft_callbacks, &servers[i]);
     }
 
-    pthread_t threads[MAX_NODES];
-    for (int i = 0; i < MAX_NODES; i++) {
-        pthread_create(&threads[i], NULL, node_thread, &nodes[i]);
+    // Add nodes
+    for (int i = 0; i < NUM_NODES; i++) {
+        for (int j = 0; j < NUM_NODES; j++) {
+            servers[i].nodes[j] = raft_add_node(servers[i].raft, NULL, j + 1, i == j);
+        }
     }
 
-    for (int i = 0; i < MAX_NODES; i++) {
-        pthread_join(threads[i], NULL);
+    // Run algorithm
+    for (int iter = 0; iter < 20; iter++) {
+        printf("\n--- Iteration %d ---\n", iter + 1);
+        for (int i = 0; i < NUM_NODES; i++) {
+            raft_periodic(servers[i].raft, 100 + (rand() % 200));
+        }
+        usleep(500000);
     }
 
-    for (int i = 0; i < MAX_NODES; i++) {
-        raft_free(nodes[i].raft);
-        pthread_mutex_destroy(&nodes[i].lock);
+    // Final States
+    printf("\n--- Final States ---\n");
+    for (int i = 0; i < NUM_NODES; i++) {
+        printf("Node %d - State: %s, Term: %ld, Leader: %d\n",
+               i + 1,
+               raft_get_state(servers[i].raft) == RAFT_STATE_LEADER ? "Leader" :
+               raft_get_state(servers[i].raft) == RAFT_STATE_CANDIDATE ? "Candidate" : "Follower",
+               raft_get_current_term(servers[i].raft),
+               raft_get_current_leader(servers[i].raft));
+    }
+
+    for (int i = 0; i < NUM_NODES; i++) {
+        raft_free(servers[i].raft);
     }
 
     return 0;
