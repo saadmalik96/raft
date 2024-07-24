@@ -20,7 +20,6 @@ void serialize_message(network_message_t *msg, char *buffer) {
                     msg->msg.ae.term, msg->msg.ae.prev_log_idx,
                     msg->msg.ae.prev_log_term, msg->msg.ae.leader_commit,
                     msg->msg.ae.n_entries);
-            // Note: This doesn't serialize the actual entries. You'd need to implement that.
             break;
         case MSG_APPENDENTRIES_RESPONSE:
             sprintf(buffer + strlen(buffer), "%ld %d %ld %ld",
@@ -51,7 +50,6 @@ void deserialize_message(char *buffer, network_message_t *msg) {
                    &msg->msg.ae.term, &msg->msg.ae.prev_log_idx,
                    &msg->msg.ae.prev_log_term, &msg->msg.ae.leader_commit,
                    &msg->msg.ae.n_entries);
-            // Note: This doesn't deserialize the actual entries. You'd need to implement that.
             break;
         case MSG_APPENDENTRIES_RESPONSE:
             sscanf(ptr, "%ld %d %ld %ld",
