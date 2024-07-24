@@ -1,13 +1,17 @@
 CC = gcc
 CFLAGS = -Iinclude -Wall -O2
+LDFLAGS = -lpthread
 
 SRC = $(wildcard src/*.c)
 OBJ = $(SRC:.c=.o)
 
-all: raft
+all: raft_node
 
-raft: $(OBJ)
-	$(CC) -o $@ $^
+raft_node: $(OBJ)
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJ) raft
+	rm -f $(OBJ) raft_node

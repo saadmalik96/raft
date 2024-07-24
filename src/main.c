@@ -2,44 +2,68 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <time.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include "raft.h"
+#include "raft_net.h"
 
-#define NUM_NODES 5
+#define NUM_NODES 3
+extern const char* NODE_IPS[NUM_NODES];
+
+const char* NODE_IPS[NUM_NODES] = {
+    "127.0.0.1",
+    "127.0.0.1",
+    "127.0.0.1"
+    // "127.0.0.1",
+    // "127.0.0.1"
+};
 
 typedef struct {
     raft_server_t *raft;
     raft_node_t *nodes[NUM_NODES];
     int node_id;
+    int server_socket;
 } server_t;
 
-server_t servers[NUM_NODES];
+server_t server;
 
-static int __send_requestvote(raft_server_t* raft, void *user_data, raft_node_t* node, msg_requestvote_t* msg) {
-    server_t *server = (server_t*)user_data;
+static int send_message(raft_server_t* raft, raft_node_t* node, message_type_t type, void* msg) {
     int target_node = raft_node_get_id(node) - 1;
+    struct sockaddr_in addr;
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
     
-    printf("Node %d sending requestvote to Node %d\n", server->node_id, target_node + 1);
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr(NODE_IPS[target_node]);
+    addr.sin_port = htons(BASE_PORT + target_node);
     
-    msg_requestvote_response_t response;
-    raft_recv_requestvote(servers[target_node].raft, servers[target_node].nodes[server->node_id - 1], msg, &response);
-    raft_recv_requestvote_response(raft, node, &response);
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("Connect failed");
+        close(sock);
+        return -1;
+    }
+    
+    network_message_t net_msg;
+    net_msg.type = type;
+    net_msg.sender_id = server.node_id;
+    memcpy(&net_msg.msg, msg, sizeof(net_msg.msg));
+    
+    char buffer[MAX_BUFFER_SIZE];
+    serialize_message(&net_msg, buffer);
+    
+    send(sock, buffer, strlen(buffer), 0);
+    close(sock);
     
     return 0;
 }
 
-// Callback for sending appendentries messages
+static int __send_requestvote(raft_server_t* raft, void *user_data, raft_node_t* node, msg_requestvote_t* msg) {
+    return send_message(raft, node, MSG_REQUESTVOTE, msg);
+}
+
 static int __send_appendentries(raft_server_t* raft, void *user_data, raft_node_t* node, msg_appendentries_t* msg) {
-    server_t *server = (server_t*)user_data;
-    int target_node = raft_node_get_id(node) - 1;
-    
-    printf("Node %d sending appendentries to Node %d\n", server->node_id, target_node + 1);
-    
-    msg_appendentries_response_t response;
-    raft_recv_appendentries(servers[target_node].raft, servers[target_node].nodes[server->node_id - 1], msg, &response);
-    raft_recv_appendentries_response(raft, node, &response);
-    
-    return 0;
+    return send_message(raft, node, MSG_APPENDENTRIES, msg);
 }
 
 // Callback for applying log entries to the state machine
@@ -69,8 +93,64 @@ static void __log(raft_server_t* raft, raft_node_t* node, void *user_data, const
     printf("Node %d: %s\n", server->node_id, buf);
 }
 
-int main() {
-    srand(time(NULL));
+void* server_thread(void* arg) {
+    char buffer[MAX_BUFFER_SIZE];
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    
+    while (1) {
+        int client_sock = accept(server.server_socket, (struct sockaddr*)&client_addr, &client_len);
+        if (client_sock < 0) {
+            perror("Accept failed");
+            continue;
+        }
+        
+        int n = recv(client_sock, buffer, MAX_BUFFER_SIZE - 1, 0);
+        buffer[n] = '\0';
+        
+        network_message_t msg;
+        deserialize_message(buffer, &msg);
+        
+        switch (msg.type) {
+            case MSG_REQUESTVOTE:
+                {
+                    msg_requestvote_response_t response;
+                    raft_recv_requestvote(server.raft, server.nodes[msg.sender_id - 1], &msg.msg.rv, &response);
+                    send_message(server.raft, server.nodes[msg.sender_id - 1], MSG_REQUESTVOTE_RESPONSE, &response);
+                }
+                break;
+            case MSG_APPENDENTRIES:
+                {
+                    msg_appendentries_response_t response;
+                    raft_recv_appendentries(server.raft, server.nodes[msg.sender_id - 1], &msg.msg.ae, &response);
+                    send_message(server.raft, server.nodes[msg.sender_id - 1], MSG_APPENDENTRIES_RESPONSE, &response);
+                }
+                break;
+            case MSG_REQUESTVOTE_RESPONSE:
+                raft_recv_requestvote_response(server.raft, server.nodes[msg.sender_id - 1], &msg.msg.rvr);
+                break;
+            case MSG_APPENDENTRIES_RESPONSE:
+                raft_recv_appendentries_response(server.raft, server.nodes[msg.sender_id - 1], &msg.msg.aer);
+                break;
+        }
+        
+        close(client_sock);
+    }
+    
+    return NULL;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <node_id>\n", argv[0]);
+        exit(1);
+    }
+    
+    server.node_id = atoi(argv[1]);
+    if (server.node_id < 1 || server.node_id > NUM_NODES) {
+        fprintf(stderr, "Invalid node_id. Must be between 1 and %d\n", NUM_NODES);
+        exit(1);
+    }
     
     raft_cbs_t raft_callbacks = {
         .send_requestvote = __send_requestvote,
@@ -80,44 +160,39 @@ int main() {
         .persist_term = __persist_term,
         .log = __log
     };
-
-    // Initialize raft servers
+    
+    server.raft = raft_new();
+    raft_set_callbacks(server.raft, &raft_callbacks, &server);
+    
     for (int i = 0; i < NUM_NODES; i++) {
-        servers[i].raft = raft_new();
-        servers[i].node_id = i + 1;
-        raft_set_callbacks(servers[i].raft, &raft_callbacks, &servers[i]);
+        server.nodes[i] = raft_add_node(server.raft, NULL, i + 1, i + 1 == server.node_id);
     }
-
-    // Add nodes
-    for (int i = 0; i < NUM_NODES; i++) {
-        for (int j = 0; j < NUM_NODES; j++) {
-            servers[i].nodes[j] = raft_add_node(servers[i].raft, NULL, j + 1, i == j);
-        }
+    
+    struct sockaddr_in server_addr;
+    server.server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = inet_addr(NODE_IPS[server.node_id - 1]);
+    server_addr.sin_port = htons(BASE_PORT + server.node_id - 1);
+    
+    if (bind(server.server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Bind failed");
+        exit(1);
     }
-
-    // Run algorithm
-    for (int iter = 0; iter < 20; iter++) {
-        printf("\n--- Iteration %d ---\n", iter + 1);
-        for (int i = 0; i < NUM_NODES; i++) {
-            raft_periodic(servers[i].raft, 100 + (rand() % 200));
-        }
-        usleep(500000);
+    
+    if (listen(server.server_socket, 5) < 0) {
+        perror("Listen failed");
+        exit(1);
     }
-
-    // Final States
-    printf("\n--- Final States ---\n");
-    for (int i = 0; i < NUM_NODES; i++) {
-        printf("Node %d - State: %s, Term: %ld, Leader: %d\n",
-               i + 1,
-               raft_get_state(servers[i].raft) == RAFT_STATE_LEADER ? "Leader" :
-               raft_get_state(servers[i].raft) == RAFT_STATE_CANDIDATE ? "Candidate" : "Follower",
-               raft_get_current_term(servers[i].raft),
-               raft_get_current_leader(servers[i].raft));
+    
+    pthread_t thread;
+    pthread_create(&thread, NULL, server_thread, NULL);
+    
+    while (1) {
+        raft_periodic(server.raft, 100);
+        usleep(100000);
     }
-
-    for (int i = 0; i < NUM_NODES; i++) {
-        raft_free(servers[i].raft);
-    }
-
+    
     return 0;
 }
